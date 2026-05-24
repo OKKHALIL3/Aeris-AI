@@ -2,10 +2,12 @@ import os
 import csv
 import random
 import sqlite3
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, jsonify
+from flask_cors import CORS
 from datetime import datetime
 
 app = Flask(__name__)
+CORS(app)
 
 DATABASE_URL = os.path.join(os.path.dirname(__file__), "readings.db")
 CSV_PATH     = os.path.join(os.path.dirname(__file__), "data.csv")
@@ -70,7 +72,6 @@ def init_db():
             completed_at TEXT
         );
     """)
-    # Ensure exactly one row exists
     cur.execute("""
         INSERT OR IGNORE INTO trigger_flags (id, status) VALUES (1, 'idle');
     """)
@@ -79,64 +80,6 @@ def init_db():
     conn.close()
 
 init_db()
-
-# ── Page routes ────────────────────────────────────────────────────────────────
-@app.route("/")
-def home():
-    return render_template("home.html")
-
-@app.route("/rooms")
-def rooms():
-    room_stats = {}
-    for room_name in ROOM_SLICES:
-        rows = rows_for_room(room_name)
-        if rows:
-            latest = rows[-1]
-            room_stats[room_name] = {
-                "temperature": latest["temperature_C"],
-                "humidity":    latest["humidity_%"],
-                "pressure":    latest["pressure_hPa"],
-            }
-    return render_template("rooms.html", room_stats=room_stats)
-
-@app.route("/alerts")
-def alerts():
-    all_rows  = read_csv()
-    triggered = []
-    for row in all_rows:
-        for field, limits in THRESHOLDS.items():
-            val = row[field]
-            if val >= limits["danger"]:
-                triggered.append({"field": field, "value": val, "level": "danger",  "timestamp": row["timestamp"]})
-            elif val >= limits["warning"]:
-                triggered.append({"field": field, "value": val, "level": "warning", "timestamp": row["timestamp"]})
-    triggered = triggered[-20:][::-1]
-    return render_template("alerts.html", triggered=triggered)
-
-@app.route("/immediate")
-def immediate():
-    conn = get_db_connection()
-    cur  = conn.cursor()
-    cur.execute("""
-        SELECT room, gas, reading, status, sensor_id,
-               temperature, humidity, pressure, air_quality,
-               screenshot_path, timestamp
-        FROM readings ORDER BY timestamp DESC LIMIT 10;
-    """)
-    db_alerts = cur.fetchall()
-    cur.close()
-    conn.close()
-    return render_template("immediate.html", alerts=db_alerts)
-
-@app.route("/room/<room_name>")
-def room_detail(room_name):
-    rows   = rows_for_room(room_name)
-    latest = rows[-1] if rows else {}
-    return render_template("room_detail.html", room=room_name, latest=latest)
-
-@app.route("/about")
-def about():
-    return render_template("about.html")
 
 # ── Chart data API ─────────────────────────────────────────────────────────────
 @app.route("/api/chart/<room_name>")
@@ -168,7 +111,7 @@ def chart_data_all():
     })
 
 # ── Generate fake DB data ──────────────────────────────────────────────────────
-@app.route("/generate")
+@app.route("/generate", methods=["POST"])
 def generate_fake_data():
     conn = get_db_connection()
     cur  = conn.cursor()
@@ -192,13 +135,11 @@ def generate_fake_data():
     conn.commit()
     cur.close()
     conn.close()
-    return "Fake data generated!"
+    return jsonify({"ok": True, "generated": 15})
 
 # ── Refresh / Trigger API ──────────────────────────────────────────────────────
-
 @app.route("/api/trigger/request", methods=["POST"])
 def trigger_request():
-    """Browser calls this when user clicks Refresh Data."""
     conn = get_db_connection()
     cur  = conn.cursor()
     cur.execute("""
@@ -211,7 +152,6 @@ def trigger_request():
 
 @app.route("/api/trigger/poll")
 def trigger_poll():
-    """Raspberry Pi polls this to check if a refresh was requested."""
     conn = get_db_connection()
     cur  = conn.cursor()
     cur.execute("SELECT status, requested_at FROM trigger_flags WHERE id=1;")
@@ -222,7 +162,6 @@ def trigger_poll():
 
 @app.route("/api/trigger/complete", methods=["POST"])
 def trigger_complete():
-    """Raspberry Pi calls this after it finishes generating + uploading data."""
     conn = get_db_connection()
     cur  = conn.cursor()
     cur.execute("""
@@ -235,7 +174,6 @@ def trigger_complete():
 
 @app.route("/api/trigger/status")
 def trigger_status():
-    """Browser polls this to know when the Pi has finished."""
     conn = get_db_connection()
     cur  = conn.cursor()
     cur.execute("SELECT status, requested_at, completed_at FROM trigger_flags WHERE id=1;")
